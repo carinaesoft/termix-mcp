@@ -1,5 +1,47 @@
 # Changelog
 
+## Unreleased
+
+Works with Termix 26.11.1 again, and only with 26.11.x. Termix 2.9 and 26.10
+moved every feature beyond hosts, credentials and sharing into plugins served
+under `/plugin-api/<plugin id>/`, so every file, exec and Docker call hit the
+single-page app instead (`no such endpoint /ssh/file_manager/ssh/executeFile`).
+
+### Changed
+- **All routes moved to their 26.11 plugins.** File manager, `run_command` and
+  sessions: `/plugin-api/file-manager/…` (same request and response shapes).
+  Docker: `/plugin-api/docker/…`. Status: the host-status plugin, uptime and
+  activity: `/dashboard/…`. Metrics: `/plugin-api/host-metrics/…`. Snippets,
+  tunnels, alerts and session recordings: their plugins. The paths live in one
+  file, `src/termix/routes.mjs`.
+- **`run_snippet` returns the snippet's output**, which the snippets plugin now
+  reports.
+- **`alerts` reads the alerts inbox.** Modes are `active` (unread) and `all`;
+  `alert_action` dismisses by marking read and undismisses by marking unread,
+  with numeric ids.
+- **`session_logs` lists session recordings** (the session-recording plugin).
+- **`list_services`, `service_action`, `list_processes` and `process_signal`
+  call the service-manager and process-manager plugins.** host-metrics no longer
+  serves them; without those plugins the tools say which one is missing.
+- **Docker sessions check `available:false`.** The plugin answers 200 when the
+  runtime is missing; that used to pass as a usable session.
+- **`call_api`'s denylist follows the same features to their plugin paths**
+  (vault, remote desktop, session sharing, automations, fleets, ai, session
+  connect, sudo password) and also refuses core `/operations`, the Operations
+  Center plugin, secret-sources, credential-tools and termix-identity.
+  Session-scoped checks apply to `/plugin-api/file-manager/` and
+  `/plugin-api/docker/`.
+- `verify-live` checks the Termix version and the plugins this server needs,
+  and with `--host` also lists `/` before the exec probe.
+
+### Removed
+- The per-service `TERMIX_URL_*` overrides. Termix 26.x has one backend.
+- Support for Termix 2.x.
+
+### Fixed
+- A file-manager session the plugin has forgotten (`SSH connection not
+  established`) is reconnected once, as `not connected` already was.
+
 ## 0.6.0
 
 The two timeouts that had to be tuned against each other are now independent:

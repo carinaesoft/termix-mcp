@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { withUnconfirmedTarget } from '../../util/upstream.mjs';
+import { TUNNELS } from '../../termix/routes.mjs';
 
 // SSH tunnel status and control. Tunnels are addressed by name; connecting one
 // references a source host and a tunnel index from its saved configuration.
@@ -13,8 +14,8 @@ export function tunnelTools() {
       hostArg: null,
       inputSchema: { name: z.string().optional().describe('Tunnel name to filter by') },
       handler: (args, ctx) => (args.name
-        ? ctx.client.get(`/ssh/tunnel/status/${encodeURIComponent(args.name)}`)
-        : ctx.client.get('/ssh/tunnel/status')),
+        ? ctx.client.get(`${TUNNELS}/status/${encodeURIComponent(args.name)}`)
+        : ctx.client.get(`${TUNNELS}/status`)),
     },
     {
       name: 'tunnel_action',
@@ -38,8 +39,16 @@ export function tunnelTools() {
           // sourceHostId is a host reference the gate's hostArg check never sees,
           // so the blocklist is applied here or not at all.
           ctx.recordHost(await ctx.hosts.resolveAllowed(args.sourceHostId));
-          return ctx.client.post('/ssh/tunnel/connect', {
-            name: args.name, sourceHostId: args.sourceHostId, tunnelIndex: args.tunnelIndex,
+          // The tunnels plugin checks the request against the name, which
+          // encodes "hostId::index::label::sourcePort::endpointHost::endpointPort"
+          // (Plugin-Tunnels src/backend/utils.ts parseTunnelName), and refuses
+          // a mismatch. The ports and endpoint are sent from the name itself.
+          const parts = args.name.split('::');
+          const fromName = parts.length === 6
+            ? { sourcePort: Number(parts[3]), endpointHost: parts[4], endpointPort: Number(parts[5]) }
+            : {};
+          return ctx.client.post(`${TUNNELS}/connect`, {
+            name: args.name, sourceHostId: args.sourceHostId, tunnelIndex: args.tunnelIndex, ...fromName,
           });
         }
         // disconnect and cancel take only a name, and Termix acknowledges both
@@ -49,7 +58,7 @@ export function tunnelTools() {
         // state a disconnect sets. So an agent typo appends permanent junk to
         // the estate. Resolve the name first and refuse an unknown one, the way
         // connect already resolves and enforces its sourceHostId.
-        const status = await ctx.client.get('/ssh/tunnel/status').catch(() => null);
+        const status = await ctx.client.get(`${TUNNELS}/status`).catch(() => null);
         if (status && typeof status === 'object' && !(args.name in status)) {
           const known = Object.keys(status);
           throw new Error(
@@ -59,9 +68,7 @@ export function tunnelTools() {
           );
         }
 
-        const endpoint = args.action === 'disconnect'
-          ? '/ssh/tunnel/disconnect'
-          : '/ssh/tunnel/cancel';
+        const endpoint = `${TUNNELS}/${args.action}`;
         return withUnconfirmedTarget(
           await ctx.client.post(endpoint, { tunnelName: args.name }),
           `tunnel "${args.name}"`,

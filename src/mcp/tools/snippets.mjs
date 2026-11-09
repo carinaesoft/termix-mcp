@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { SNIPPETS } from '../../termix/routes.mjs';
 
 // Snippet inventory. Execution lives in exec.mjs (run_snippet) because it
 // targets a host and shares the mutation gating with run_command.
@@ -12,8 +13,8 @@ export function snippetTools() {
       hostArg: null,
       inputSchema: { id: z.number().optional().describe('Snippet id to fetch in full') },
       handler: (args, ctx) => (args.id !== undefined
-        ? ctx.client.get(`/snippets/${args.id}`)
-        : ctx.client.get('/snippets')),
+        ? ctx.client.get(`${SNIPPETS}/${args.id}`)
+        : ctx.client.get(SNIPPETS)),
     },
   ];
 }

@@ -19,7 +19,7 @@ with a proper SSH session manager and full audit logging.
 | Docker | `docker_containers`, `docker_container_info`, `docker_container_action` |
 | System | `list_services`, `service_action`, `list_processes`, `process_signal` |
 | Tunnels & snippets | `list_tunnels`, `tunnel_action`, `list_snippets` |
-| Termix observability | `audit_logs`, `session_logs`, `recent_activity`, `alerts` |
+| Termix observability | `audit_logs`, `session_logs` (session recordings), `recent_activity`, `alerts`, `alert_action` |
 | Access policy | `access_policy_schema`, `access_policy_check` |
 | Meta | `call_api`, `toggle_state`, `help` |
 
@@ -218,8 +218,8 @@ hosts you intend to manage. Every variable and its default is documented in
 | `MCP_HTTP_TOKEN` | *(required for HTTP)* | Bearer guarding the `/mcp` endpoint |
 | `WAZUH_ENABLED` | `false` | UDP syslog forwarding |
 
-If the Termix backend services are **not** unified behind one origin, set the
-per-service `TERMIX_URL_*` overrides.
+Termix 26.x serves the whole API — core and plugins — from one origin, so there
+are no per-service URL overrides.
 
 ## Running
 
@@ -360,23 +360,24 @@ and release write scope. Forgejo's automatic Actions token cannot write packages
 prefixes are reserved, which is why it carries this name. The GitHub workflow
 needs no equivalent — `GITHUB_TOKEN` with `packages: write` covers it.
 
-Verified live against Termix 2.6.0, and against 2.7.0 and 2.7.1 by source
-comparison — every endpoint this server calls still exists at the same path,
-and the `executeFile`, `changePermissions`, `readFile` and `writeFile` handlers
-are byte-identical across 2.6.0, 2.6.1, 2.7.0 and 2.7.1. 2.7.0 changed one
-behaviour that matters here: `deleteItem` moves to `~/.termix-trash` unless the
-request sets `permanent`, which this server now always does for its own temp
-files. 2.7.1 adds exactly one endpoint (`POST /credentials/{id}/duplicate`,
-already refused by `call_api`'s `/credentials` rule) and removes or renames
-none; its handler changes are confined to SSH connect-time key validation and
-jump-host errors, both in shapes this server already parses. Two upstream
-behaviours shifted, visibly but harmlessly: hosts with metrics polling disabled
-are now SSH-probed each status cycle, so `host_status` can say `online` where
-2.7.0 said `reachable` (Termix itself now generates periodic SSH logins on
-those hosts — expect auth-log noise), and a failed connect through a jump host
-can take ~65 s per hop server-side instead of ~30 s, which only matters when
-`TERMIX_TIMEOUT_MS` is raised past its 20 s default. Run `verify-live` against
-2.7.1 to confirm it on a live instance.
+Targets **Termix 26.11.x** only. Since 26.10 every feature beyond hosts,
+credentials and sharing is a plugin served under `/plugin-api/<plugin id>/`, so
+this server calls `/plugin-api/file-manager/…` (sessions, files and
+`executeFile`), `/plugin-api/docker/…`, `/plugin-api/host-metrics/…`,
+`/plugin-api/host-status/`, `/plugin-api/snippets/…`, `/plugin-api/tunnels/…`,
+`/plugin-api/alerts/…` and `/plugin-api/session-recording/…`; core keeps
+`/host/db/…`, `/audit-logs`, `/version`, `/plugins` and `/dashboard/…`. Every
+path lives in `src/termix/routes.mjs`. `list_services`/`service_action` and
+`list_processes`/`process_signal` need the separate **service-manager** and
+**process-manager** plugins, which replaced host-metrics' managers; without
+them those tools say which plugin is missing. Behaviours worth knowing:
+`run_snippet` now returns the snippet's output; `alerts` reads the alerts
+inbox (dismiss = mark read); `session_logs` lists session recordings, and every
+content read lands in Termix's access history; `host_metrics` returns a note
+instead of data until Termix has polled the host. `call_api`'s denylist follows
+the features to their plugin paths and also refuses core `/operations` and the
+Operations Center plugin, which run plugin actions on hosts outside the
+blocklist and the audit log. Termix 2.x is not supported.
 
 The API can drift between versions; if a Termix upgrade changes the
 `executeFile`, `connect`, or `readFile` response shapes, re-run `verify-live`

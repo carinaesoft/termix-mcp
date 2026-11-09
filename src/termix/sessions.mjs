@@ -1,4 +1,5 @@
 import { fileSessionId, dockerSessionId } from '../util/ids.mjs';
+import { FILES, DOCKER } from './routes.mjs';
 
 // Manages the stateful SSH sessions Termix requires for file operations and
 // Docker control. The frontend opens one such session per host and keeps it
@@ -12,36 +13,32 @@ import { fileSessionId, dockerSessionId } from '../util/ids.mjs';
 
 const KIND = {
   file: {
-    connectPath: '/ssh/file_manager/ssh/connect',
-    keepalivePath: '/ssh/file_manager/ssh/keepalive',
-    disconnectPath: '/ssh/file_manager/ssh/disconnect',
+    connectPath: `${FILES}/connect`,
+    keepalivePath: `${FILES}/keepalive`,
+    disconnectPath: `${FILES}/disconnect`,
     makeId: fileSessionId,
   },
   docker: {
-    connectPath: '/docker/ssh/connect',
-    keepalivePath: '/docker/ssh/keepalive',
-    disconnectPath: '/docker/ssh/disconnect',
+    connectPath: `${DOCKER}/ssh/connect`,
+    keepalivePath: `${DOCKER}/ssh/keepalive`,
+    disconnectPath: `${DOCKER}/ssh/disconnect`,
     makeId: dockerSessionId,
   },
 };
 
-// A connect response is only usable when status === "success". Every other
-// documented shape means the host needs interaction this server cannot provide.
-function connectProblem(kind, response) {
-  if (kind === 'docker') {
-    // Docker connect returns { message } on success; treat an error field or a
-    // requires_* flag as a problem.
-    if (response?.requires_totp) return 'host requires a TOTP code';
-    if (response?.requires_warpgate) return 'host requires Warpgate authentication';
-    if (response?.error) return response.error;
-    return null;
-  }
+// A connect response is only usable when status === "success". Both plugins
+// (file-manager src/backend/index.ts, docker src/backend/connect.ts) answer a
+// prompt they cannot complete without a human with 200 and a flag instead.
+function connectProblem(response) {
   if (response?.status === 'success') return null;
   if (response?.requires_totp) return 'host requires a TOTP code';
+  if (response?.requires_browser_sign_in) return 'host requires a browser sign-in';
   if (response?.requires_warpgate) return 'host requires Warpgate authentication';
   if (response?.status === 'passphrase_required') return 'host key needs a passphrase';
   if (response?.status === 'auth_required') return 'host needs interactive authentication';
-  if (response?.status === 'error') return response.message || 'connection failed';
+  if (response?.status === 'error' || response?.success === false) {
+    return response.message || response.error || 'connection failed';
+  }
   return `unexpected connect status: ${response?.status ?? 'none'}`;
 }
 
@@ -97,12 +94,14 @@ export function createSessionManager({ client, config, logger, audit, wazuh }) {
   async function connect(kind, host) {
     const spec = KIND[kind];
     const sessionId = spec.makeId(host.id);
+    // The plugins resolve credentials from hostId; file-manager still refuses
+    // a body without ip/port/username, docker needs only the id.
     const body = kind === 'docker'
       ? { sessionId, hostId: host.id }
       : { sessionId, hostId: host.id, ip: host.ip, port: host.port, username: host.username };
 
     const response = await client.post(spec.connectPath, body);
-    const problem = connectProblem(kind, response);
+    const problem = connectProblem(response);
     if (problem) {
       const err = new Error(`cannot open ${kind} session on ${host.name || host.ip}: ${problem}`);
       err.unsupported = true;
@@ -128,11 +127,18 @@ export function createSessionManager({ client, config, logger, audit, wazuh }) {
     if (!session) {
       session = await connect(kind, host);
       if (kind === 'docker') {
+        // 26.x answers 200 {available:false, error} when the runtime is
+        // missing or its daemon is down, so a resolved call is not enough.
+        let problem = null;
         try {
-          await client.get(`/docker/validate/${session.sessionId}`);
+          const check = await client.get(`${DOCKER}/validate/${session.sessionId}`);
+          if (check?.available === false) problem = check.error || 'runtime unavailable';
         } catch (error) {
+          problem = error.message;
+        }
+        if (problem) {
           await teardown('docker', host.id, 'docker-unavailable');
-          throw new Error(`Docker is not available on ${host.name || host.ip}: ${error.message}`);
+          throw new Error(`Docker is not available on ${host.name || host.ip}: ${problem}`);
         }
       }
     }
@@ -180,6 +186,7 @@ export function createSessionManager({ client, config, logger, audit, wazuh }) {
       && (msg.includes('not connected')
         || msg.includes('session not found')
         || msg.includes('not available')
+        || msg.includes('not established')
         || msg.includes('no ssh'));
   }
 

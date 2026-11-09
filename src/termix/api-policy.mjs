@@ -6,6 +6,12 @@
 // the mutation gate advisory rather than enforced. This module is what keeps
 // call_api from being a hole in both.
 
+// Termix 26.x serves every feature beyond hosts, credentials and sharing from
+// a plugin under /plugin-api/<plugin id>/, so the rules below that used to sit
+// at the root (/vault, /automations, /docker/ssh/connect, ...) now name the
+// plugin. Same rule set as before, at the new addresses.
+const P = (id, rest = '(\\/|$)') => new RegExp(`^\\/plugin-api\\/${id}${rest}`);
+
 // Endpoints call_api must never reach, whatever the method.
 const FORBIDDEN = [
   [/^\/host\/db\/host\/[^/]+\/password\b/, 'returns a stored host password'],
@@ -15,19 +21,20 @@ const FORBIDDEN = [
   [/^\/host\/db\/hosts\/export/, 'exports every host with decrypted credentials'],
   [/^\/host\/db\/host\/[^/]+\/export/, 'exports a host with its decrypted credentials'],
   [/^\/credentials(\/|$)/, 'reads or writes stored SSH credentials'],
-  [/^\/vault(\/|$)/, 'vault profiles hold credential material'],
-  [/^\/termix-id\/linked-credentials/, 'exposes credential linkage'],
+  [P('vault'), 'vault profiles hold credential material'],
+  [P('secret-sources'), 'pulls host passwords and keys from external secret stores'],
+  [P('credential-tools'), 'generates SSH keys and copies them onto hosts'],
+  [P('termix-identity'), 'publishes SSH keys and runs an SSH certificate authority'],
   [/^\/users\/api-keys/, 'lists or mints Termix API keys'],
   [/^\/users\/me\/token/, 'returns the current session token'],
   [/^\/users\/webauthn\/credentials/, 'passkey material'],
   [/^\/users\/(admin\/reset-password|change-password|internal\/auto-session)/, 'account credential operation'],
   [/^\/host\/quick-connect/, 'connects to an arbitrary address, bypassing the host blocklist'],
   [/^\/host\/enroll/, 'enrolls a new host using an API key'],
-  [/^\/guacamole(\/|$)/, 'issues remote-desktop connection tokens'],
-  [/^\/session-sharing(\/|$)/, 'shares a live session with other people'],
+  [P('remote-desktop'), 'issues remote-desktop connection tokens'],
+  [P('session-sharing'), 'shares a live session with other people'],
   [/^\/rbac\/.*\/share/, 'grants other users access to a host or snippet'],
-  // Termix 2.7.0 added three surfaces that reach a shell without going through
-  // resolveAllowed. Each stores its target server-side and runs later, so the
+  // Surfaces that reach a shell without going through resolveAllowed. Each stores its target server-side and runs later, so the
   // request carries no host id for extractHostIds to find: the blocklist, the
   // access profile, the mutation gate and this server's audit log are bypassed
   // together, and the command lands on the host with nothing here to explain
@@ -37,30 +44,36 @@ const FORBIDDEN = [
   // /session-sharing already are -- because these are new and unexercised, and
   // the rule at the top of extractHostIds applies just as well here: a false
   // refusal on the escape hatch is recoverable, a false pass is not. Narrow
-  // them once the surface has been reviewed against a live 2.7.0 instance.
-  [/^\/automations(\/|$)/, 'an automation step can be a run_command action, so this executes on hosts outside the blocklist, the access profile and the audit log'],
-  [/^\/fleet(\/|$)/, 'fleet operations execute across every member host at once, outside the blocklist, the access profile and the audit log'],
+  // them once the surface has been reviewed against a live instance.
+  [P('automations'), 'an automation step can be a run_command action, so this executes on hosts outside the blocklist, the access profile and the audit log'],
+  [P('fleets'), 'fleet operations execute across every member host at once, outside the blocklist, the access profile and the audit log'],
+  // New in 26.x and the same class: every plugin action (restart a container,
+  // delete a path, run a snippet, ...) is runnable through core /operations
+  // and through Operations Center's rollouts, baselines and MCP endpoint, with
+  // the target host stored server-side or chosen by selector.
+  [/^\/operations(\/|$)/, 'runs plugin actions on hosts outside the blocklist, the access profile and the audit log'],
+  [P('operations-center'), 'runs and rolls out plugin actions across hosts outside the blocklist, the access profile and the audit log'],
   // The entire safety model of Termix AI is that a proposed command runs only
   // after a human approves it -- and /ai/proposals/:id/apply IS that approval,
   // so the hatch would be able to approve proposals it had just generated
   // itself via /ai/chat/stream. /ai/providers additionally stores third-party
   // provider API keys, which no rule above and no SENSITIVE_SEGMENTS term covers.
-  [/^\/ai(\/|$)/, 'applies AI-proposed commands and stores third-party provider API keys'],
+  [P('ai'), 'applies AI-proposed commands and stores third-party provider API keys'],
   // Session establishment must go through the real tools, which resolve the
   // host and apply the blocklist first.
-  [/^\/ssh\/file_manager\/ssh\/connect/, 'opens an SSH session; use the file tools so the blocklist applies'],
-  [/^\/docker\/ssh\/connect/, 'opens an SSH session; use the docker tools so the blocklist applies'],
-  [/^\/ssh\/file_manager\/sudo-password/, 'sets a sudo password on a session'],
+  // Prefix match, so connect-totp and connect-browser-sign-in are covered too.
+  [P('file-manager', '\\/connect'), 'opens an SSH session; use the file tools so the blocklist applies'],
+  [P('docker', '\\/ssh\\/connect'), 'opens an SSH session; use the docker tools so the blocklist applies'],
+  [P('file-manager', '\\/sudo-password'), 'sets a sudo password on a session'],
 ];
 
 // Where a host id can appear in a path, so a targeted call can be blocklist-checked.
 const HOST_ID_IN_PATH = [
   /^\/host\/db\/host\/(\d+)/,
-  /^\/status\/(\d+)/,
-  /^\/metrics\/(?:history\/)?(\d+)/,
-  /^\/host-metrics\/(?:managers\/[^/]+|platform|preferences)\/(\d+)/,
-  /^\/host\/command-history\/(\d+)/,
-  /^\/host\/opkssh\/token\/(\d+)/,
+  P('host-metrics', '\\/metrics\\/(?:history\\/)?(\\d+)'),
+  P('host-metrics', '\\/host-metrics\\/(?:managers\\/[^/]+|platform|preferences)\\/(\\d+)'),
+  P('(?:service-manager|process-manager)', '\\/(\\d+)'),
+  P('ssh-terminal', '\\/command-history\\/(\\d+)'),
   /^\/rbac\/host\/(\d+)/,
   /^\/credentials\/[^/]+\/apply-to-host\/(\d+)/,
 ];
@@ -83,7 +96,7 @@ const HOST_ID_FIELDS = ['hostId', 'sourceHostId', 'host_id'];
 // Paths whose stateful sessions this server owns. A call_api request touching
 // one must present a session this server opened, so a leaked or guessed session
 // id cannot be used to reach a host the blocklist forbids.
-const SESSION_SCOPED = [/^\/ssh\/file_manager\//, /^\/docker\//];
+const SESSION_SCOPED = [P('file-manager', '\\/'), P('docker', '\\/')];
 
 // Reduce a caller-supplied path to the single form every rule is matched
 // against, and that is then sent upstream -- so what was checked is exactly what
@@ -190,6 +203,10 @@ export function extractHostIds(rawPath, query, body) {
       if (normalized === 'hostids' && Array.isArray(value)) {
         for (const entry of value) ids.add(String(entry));
       }
+      // host-status takes ?hostIds=1,2,3 as one comma-separated string.
+      if (normalized === 'hostids' && typeof value === 'string') {
+        for (const entry of value.split(',')) if (entry.trim()) ids.add(entry.trim());
+      }
     }
   }
   return [...ids];
@@ -200,8 +217,9 @@ export function extractSessionId(rawPath, query, body) {
   const path = canonicalizePath(rawPath);
   const lower = path.toLowerCase();
   if (!SESSION_SCOPED.some((re) => re.test(lower))) return null;
-  const fromPath = /^\/docker\/(?:containers|validate)\/([^/]+)/.exec(lower);
+  // Docker puts the session in the path: /plugin-api/docker/<surface>/<sessionId>/...
+  const fromPath = P('docker', '\\/(?:containers|validate|stacks|updates)\\/([^/]+)').exec(lower);
   // Read the id from the ORIGINAL-case path: session ids are case-sensitive.
-  if (fromPath) return path.split('/')[3] ?? null;
+  if (fromPath) return path.split('/')[4] ?? null;
   return query?.sessionId ?? body?.sessionId ?? null;
 }

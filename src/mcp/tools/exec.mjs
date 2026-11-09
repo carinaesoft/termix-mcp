@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { randomUUID } from 'node:crypto';
 import { hostArg } from './host-arg.mjs';
+import { FILES, SNIPPETS } from '../../termix/routes.mjs';
 
 // run_command has no native endpoint in Termix: the file manager can write,
 // chmod, and execute a file and it DOES return the captured output, so a
@@ -127,14 +128,14 @@ export async function runScript(ctx, host, script) {
     // the one that actually ran against the host.
     ctx.noteSession?.('file', sessionId);
     try {
-      await client.post('/ssh/file_manager/ssh/writeFile', {
+      await client.post(`${FILES}/writeFile`, {
         sessionId,
         path: remotePath,
         content: body,
       });
       // 700, not 755: the script body is the command, which may carry a secret,
       // and /tmp is world-readable. executeFile only needs the owner's x bit.
-      await client.post('/ssh/file_manager/ssh/changePermissions', {
+      await client.post(`${FILES}/changePermissions`, {
         sessionId,
         path: remotePath,
         permissions: '700',
@@ -142,7 +143,7 @@ export async function runScript(ctx, host, script) {
       // The only call in the server that gets the long timeout: this one waits
       // on the command itself, while writeFile and changePermissions above are
       // ordinary metadata round trips.
-      const result = await client.post('/ssh/file_manager/ssh/executeFile', {
+      const result = await client.post(`${FILES}/executeFile`, {
         sessionId,
         filePath: remotePath,
       }, { timeoutMs: config.execTimeoutMs });
@@ -169,18 +170,16 @@ export async function runScript(ctx, host, script) {
       // one round trip, and best-effort: a leaked temp file is noise, not a
       // failure, and one already removed by a retry must not mask the others.
       //
-      // `permanent` is REQUIRED, not cosmetic. From Termix 2.7.0 deleteItem
-      // defaults to moving the item to ~/.termix-trash instead of removing it,
+      // `permanent` is REQUIRED, not cosmetic. The file-manager plugin's
+      // deleteItem defaults to moving the item to ~/.termix-trash instead of removing it,
       // which would park the command's captured output -- the thing the umask
       // 077 above exists to protect -- in the SSH user's home for the trash
       // retention window (7 days by default), on every host, for every command.
       // Where /tmp is a tmpfs the trash move is a cross-device rename that
       // fails outright, so the files would simply never be cleaned up at all.
-      // Harmless on 2.6.x, which destructures only sessionId/path/isDirectory
-      // and ignores the field.
       await Promise.allSettled(
         [remotePath, outPath, errPath].map((p) => client
-          .del('/ssh/file_manager/ssh/deleteItem', {
+          .del(`${FILES}/deleteItem`, {
             sessionId, path: p, isDirectory: false, permanent: true,
           })
           .catch((error) => {
@@ -216,21 +215,21 @@ export function execTools() {
       name: 'run_snippet',
       title: 'Run a saved snippet',
       description:
-        'Execute a saved Termix snippet on a host. Fire-and-forget: Termix runs the snippet in a '
-        + 'terminal session and does NOT return its output. Use run_command when you need the output.',
+        'Execute a saved Termix snippet on a host and return its output. Termix runs it over its own '
+        + 'SSH exec channel and reports success, output and error (no numeric exit code); a snippet '
+        + 'that outlives Termix\'s limit returns what it printed so far with a timeout error.',
       mutating: true,
       hostArg: 'host',
       inputSchema: {
         host: hostArg,
         snippetId: z.number().describe('Snippet id (from list_snippets)'),
       },
-      handler: async (args, ctx) => {
-        await ctx.client.post('/snippets/execute', {
-          snippetId: args.snippetId,
-          hostId: ctx.host.id,
-        });
-        return { ok: true, note: 'snippet dispatched; Termix does not return snippet output' };
-      },
+      // Plugin-Snippets src/backend/routes.ts POST /execute: 200 {success,
+      // output, error?}, 504 {code: COMMAND_TIMEOUT, output, errorOutput}.
+      handler: (args, ctx) => ctx.client.post(`${SNIPPETS}/execute`, {
+        snippetId: args.snippetId,
+        hostId: ctx.host.id,
+      }, { timeoutMs: ctx.config?.execTimeoutMs }),
     },
   ];
 }

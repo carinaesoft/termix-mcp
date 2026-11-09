@@ -2,6 +2,7 @@ import { z } from 'zod';
 import path from 'node:path';
 import { runScript } from './exec.mjs';
 import { hostArg } from './host-arg.mjs';
+import { FILES } from '../../termix/routes.mjs';
 
 // Line window for read_file. Applied here rather than on the host because
 // Termix's readFile takes no range, so this saves context rather than transfer
@@ -61,7 +62,7 @@ export function fileTools() {
       },
       handler: async (args, ctx) => {
         const result = await ctx.sessions.withFileSession(ctx.host, (s) =>
-          ctx.client.get('/ssh/file_manager/ssh/readFile', { sessionId: s.sessionId, path: args.path }));
+          ctx.client.get(`${FILES}/readFile`, { sessionId: s.sessionId, path: args.path }));
 
         if (args.offset === undefined && args.limit === undefined) return result;
         if (!result || typeof result.content !== 'string' || result.encoding === 'base64') {
@@ -82,7 +83,7 @@ export function fileTools() {
       pathArgs: ['path'],
       inputSchema: { host: hostArg, path: z.string().default('.').describe('Directory path on the host') },
       handler: (args, ctx) => ctx.sessions.withFileSession(ctx.host, (s) =>
-        ctx.client.get('/ssh/file_manager/ssh/listFiles', { sessionId: s.sessionId, path: args.path })),
+        ctx.client.get(`${FILES}/listFiles`, { sessionId: s.sessionId, path: args.path })),
     },
     {
       name: 'get_file_info',
@@ -98,7 +99,7 @@ export function fileTools() {
         const target = args.path.replace(/\/+$/, '') || '/';
         const parent = path.posix.dirname(target);
         const base = path.posix.basename(target);
-        const listing = await ctx.client.get('/ssh/file_manager/ssh/listFiles', {
+        const listing = await ctx.client.get(`${FILES}/listFiles`, {
           sessionId: s.sessionId,
           path: parent,
         });
@@ -151,7 +152,7 @@ export function fileTools() {
       pathArgs: ['path'],
       inputSchema: { host: hostArg, path: z.string(), content: z.string() },
       handler: (args, ctx) => ctx.sessions.withFileSession(ctx.host, (s) =>
-        ctx.client.post('/ssh/file_manager/ssh/writeFile', {
+        ctx.client.post(`${FILES}/writeFile`, {
           sessionId: s.sessionId, path: args.path, content: args.content,
         })),
     },
@@ -168,7 +169,7 @@ export function fileTools() {
         fileName: z.string().describe('Name of the new file'),
       },
       handler: (args, ctx) => ctx.sessions.withFileSession(ctx.host, (s) =>
-        ctx.client.post('/ssh/file_manager/ssh/createFile', {
+        ctx.client.post(`${FILES}/createFile`, {
           sessionId: s.sessionId, path: args.path, fileName: args.fileName,
         })),
     },
@@ -185,7 +186,7 @@ export function fileTools() {
         folderName: z.string().describe('Name of the new folder'),
       },
       handler: (args, ctx) => ctx.sessions.withFileSession(ctx.host, (s) =>
-        ctx.client.post('/ssh/file_manager/ssh/createFolder', {
+        ctx.client.post(`${FILES}/createFolder`, {
           sessionId: s.sessionId, path: args.path, folderName: args.folderName,
         })),
     },
@@ -206,21 +207,18 @@ export function fileTools() {
         host: hostArg,
         path: z.string(),
         isDirectory: z.boolean().default(false),
-        // Defaulted true to keep this tool meaning what its name and every
-        // prior release said it means. Termix 2.7.0 flipped the server-side
-        // default the other way: an omitted `permanent` now moves the item to
-        // ~/.termix-trash rather than deleting it, so leaving this unset would
-        // have silently turned delete_item into "move to trash" -- freeing no
-        // space, and erroring outright (409 trashUnavailable) on hosts where
+        // Defaulted true to keep this tool meaning what its name says. The
+        // file-manager plugin defaults the other way: an omitted `permanent`
+        // moves the item to ~/.termix-trash rather than deleting it -- freeing
+        // no space, and erroring outright (409 trashUnavailable) on hosts where
         // the trash directory cannot be created or the rename crosses a
-        // filesystem. Ignored by 2.6.x, which never reads the field.
+        // filesystem.
         permanent: z.boolean().default(true).describe(
-          'Delete outright (default). False moves the item to Termix\'s trash on hosts '
-          + 'running 2.7.0 or later, and is ignored by older versions, which always delete.',
+          'Delete outright (default). False moves the item to Termix\'s trash instead.',
         ),
       },
       handler: (args, ctx) => ctx.sessions.withFileSession(ctx.host, (s) =>
-        ctx.client.del('/ssh/file_manager/ssh/deleteItem', {
+        ctx.client.del(`${FILES}/deleteItem`, {
           sessionId: s.sessionId,
           path: args.path,
           isDirectory: args.isDirectory,
@@ -236,7 +234,7 @@ export function fileTools() {
       pathArgs: ['oldPath', 'newPath'],
       inputSchema: { host: hostArg, oldPath: z.string(), newPath: z.string() },
       handler: (args, ctx) => ctx.sessions.withFileSession(ctx.host, (s) =>
-        ctx.client.put('/ssh/file_manager/ssh/moveItem', {
+        ctx.client.put(`${FILES}/moveItem`, {
           sessionId: s.sessionId, oldPath: args.oldPath, newPath: args.newPath,
         })),
     },
@@ -257,7 +255,7 @@ export function fileTools() {
         targetDir: z.string().describe('Directory to copy into'),
       },
       handler: (args, ctx) => ctx.sessions.withFileSession(ctx.host, (s) =>
-        ctx.client.post('/ssh/file_manager/ssh/copyItem', {
+        ctx.client.post(`${FILES}/copyItem`, {
           sessionId: s.sessionId, sourcePath: args.sourcePath, targetDir: args.targetDir, hostId: ctx.host.id,
         })),
     },
@@ -274,7 +272,7 @@ export function fileTools() {
         permissions: z.string().regex(/^[0-7]{3,4}$/).describe('Octal mode, e.g. 644'),
       },
       handler: (args, ctx) => ctx.sessions.withFileSession(ctx.host, (s) =>
-        ctx.client.post('/ssh/file_manager/ssh/changePermissions', {
+        ctx.client.post(`${FILES}/changePermissions`, {
           sessionId: s.sessionId, path: args.path, permissions: args.permissions,
         })),
     },

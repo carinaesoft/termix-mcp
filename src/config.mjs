@@ -42,17 +42,10 @@ export function loadConfig(mode = 'stdio') {
 
   const dataDir = path.resolve(optional('DATA_DIR', './data'));
 
-  const serviceUrls = {};
-  for (const service of ['MAIN', 'TUNNELS', 'FILES', 'STATS', 'DASHBOARD', 'DOCKER', 'SERIAL']) {
-    const value = optional(`TERMIX_URL_${service}`, '');
-    if (value) serviceUrls[service.toLowerCase()] = baseUrl(value);
-  }
-
   return {
     mode,
     baseUrl: baseUrl(required('TERMIX_BASE_URL')),
     apiKey: required('TERMIX_API_KEY'),
-    serviceUrls,
     timeoutMs: number('TERMIX_TIMEOUT_MS', 20000),
 
     // Bounds the executeFile call alone. TERMIX_TIMEOUT_MS is global to every

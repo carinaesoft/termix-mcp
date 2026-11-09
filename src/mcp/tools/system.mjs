@@ -2,9 +2,23 @@ import { z } from 'zod';
 
 import { hostArg } from './host-arg.mjs';
 import { assertUpstreamOk } from '../../util/upstream.mjs';
+import { SERVICES, PROCESSES } from '../../termix/routes.mjs';
 
-// systemd and process management via Termix's host-metrics managers. These
-// address the host by its Termix id directly (no file/docker session needed).
+// systemd and process management. Termix 26.x moved these out of host-metrics
+// into two plugins of their own, service-manager and process-manager, which
+// address the host by its Termix id (no file/docker session needed). Neither is
+// active on every install; without it Termix answers 404 "This feature is not
+// available", which notInstalled() turns into an actionable message.
+const notInstalled = (pluginId) => (error) => {
+  if (error?.status === 404 && /not available/i.test(error.message)) {
+    throw new Error(
+      `the Termix "${pluginId}" plugin is not installed or not enabled on this Termix, `
+      + 'so this tool has nothing to call. Install it in Termix (Settings -> Plugins), '
+      + 'or use run_command.',
+    );
+  }
+  throw error;
+};
 export function systemTools() {
   return [
     {
@@ -14,16 +28,16 @@ export function systemTools() {
       mutating: false,
       hostArg: 'host',
       inputSchema: { host: hostArg },
-      handler: (_args, ctx) => ctx.client.get(`/host-metrics/managers/services/${ctx.host.id}`),
+      handler: (_args, ctx) => ctx.client
+        .get(`${SERVICES}/${ctx.host.id}/units`, { type: 'service' })
+        .catch(notInstalled('service-manager')),
     },
     {
       name: 'service_action',
       title: 'Control a systemd service',
       description:
         'Start, stop, restart, enable, or disable a systemd unit on a host. Mutating. '
-        + 'NOTE: Termix gates this behind a sudo password set on the host record and refuses with '
-        + '403 "requires elevated privileges" without one -- even when the SSH user is already '
-        + 'root. If that appears, the fix is in Termix\'s host configuration, not the command; '
+        + 'Needs the Termix service-manager plugin and edit access to the host; '
         + 'run_command with systemctl is the workaround.',
       mutating: true,
       hostArg: 'host',
@@ -34,9 +48,9 @@ export function systemTools() {
       },
       handler: async (args, ctx) => assertUpstreamOk(
         await ctx.client.post(
-          `/host-metrics/managers/services/${ctx.host.id}/action`,
-          { unit: args.unit, action: args.action },
-        ),
+          `${SERVICES}/${ctx.host.id}/units/${encodeURIComponent(args.unit)}/actions/${args.action}`,
+          {},
+        ).catch(notInstalled('service-manager')),
         `service ${args.action}`,
       ),
     },
@@ -47,7 +61,9 @@ export function systemTools() {
       mutating: false,
       hostArg: 'host',
       inputSchema: { host: hostArg },
-      handler: (_args, ctx) => ctx.client.get(`/host-metrics/managers/processes/${ctx.host.id}`),
+      handler: (_args, ctx) => ctx.client
+        .get(`${PROCESSES}/${ctx.host.id}/processes`)
+        .catch(notInstalled('process-manager')),
     },
     {
       name: 'process_signal',
@@ -62,9 +78,9 @@ export function systemTools() {
       },
       handler: async (args, ctx) => assertUpstreamOk(
         await ctx.client.post(
-          `/host-metrics/managers/processes/${ctx.host.id}/signal`,
-          { pid: args.pid, signal: args.signal },
-        ),
+          `${PROCESSES}/${ctx.host.id}/processes/${args.pid}/signal`,
+          { signal: args.signal },
+        ).catch(notInstalled('process-manager')),
         `signal ${args.signal} to pid ${args.pid}`,
       ),
     },

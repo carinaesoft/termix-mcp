@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { scrubValue } from '../../util/redact.mjs';
 import { withUnconfirmedTarget } from '../../util/upstream.mjs';
+import { ALERTS, RECORDINGS } from '../../termix/routes.mjs';
 
 // Termix's own records: its audit log, terminal session logs, activity feed,
 // and alerts. Useful for verifying what the MCP (or anyone) did, and for
@@ -56,27 +57,30 @@ export function observabilityTools() {
     {
       name: 'session_logs',
       title: 'Terminal session logs',
-      description: 'List terminal session logs, or fetch one session\'s metadata or full content by id.',
+      description:
+        'List session recordings (the session-recording plugin), or fetch one recording\'s metadata '
+        + 'or full content by id. Content is the plain recording -- text or asciicast; remote-desktop '
+        + 'recordings are binary and large. Every content read is recorded in Termix\'s access history.',
       mutating: false,
       hostArg: null,
       inputSchema: {
-        id: z.string().optional().describe('Session log id'),
+        id: z.string().optional().describe('Recording id from the list'),
         content: z.boolean().default(false).describe('With an id, return the full content instead of metadata'),
       },
       handler: async (args, ctx) => {
-        if (!args.id) return ctx.client.get('/session_logs');
+        if (!args.id) return ctx.client.get(`${RECORDINGS}/`);
         // ENCODED, not interpolated raw. urlFor concatenates onto the origin and
         // hands the result to fetch, whose URL parser resolves "..", so an id of
-        // "../users/api-keys" used to leave /session_logs entirely and reach any
+        // "../users/api-keys" used to leave the recordings route entirely and reach any
         // endpoint the API key can -- around call_api's denylist, the host
         // blocklist, and the session-ownership check, from a read-only tool. A
         // "?" in the value opened a real query string too.
         const id = encodeURIComponent(args.id);
-        if (!args.content) return ctx.client.get(`/session_logs/${id}`);
+        if (!args.content) return ctx.client.get(`${RECORDINGS}/${id}`);
         // A terminal transcript contains whatever was typed at a sudo, mysql or
         // ssh prompt. Scrubbed before it reaches the model, because this is the
         // one tool that hands raw keystrokes back.
-        const log = await ctx.client.get(`/session_logs/${id}/content`);
+        const log = await ctx.client.get(`${RECORDINGS}/${id}/content`);
         if (typeof log === 'string') return scrubValue(log);
         if (log && typeof log.content === 'string') {
           return { ...log, content: scrubValue(log.content), scrubbed: true };
@@ -91,18 +95,28 @@ export function observabilityTools() {
       mutating: false,
       hostArg: null,
       inputSchema: { limit: z.number().int().positive().max(200).default(50) },
-      handler: (args, ctx) => ctx.client.get('/activity/recent', { limit: args.limit }),
+      handler: (args, ctx) => ctx.client.get('/dashboard/activity/recent', { limit: args.limit }),
     },
     {
       name: 'alerts',
       title: 'List alerts',
-      description: 'List active alerts (the default) or dismissed alerts. Read-only; use alert_action to dismiss.',
+      description:
+        'List alerts from the Termix alerts inbox, newest first, with the unread count. mode "active" '
+        + '(default) returns unread alerts, "all" includes those already read (dismissed). Read-only; '
+        + 'use alert_action to dismiss.',
       mutating: false,
       hostArg: null,
-      inputSchema: { mode: z.enum(['active', 'dismissed']).default('active') },
-      handler: (args, ctx) => (args.mode === 'dismissed'
-        ? ctx.client.get('/alerts/dismissed')
-        : ctx.client.get('/alerts')),
+      inputSchema: {
+        mode: z.enum(['active', 'all']).default('active'),
+        severity: z.enum(['info', 'success', 'warning', 'critical']).optional(),
+        limit: z.number().int().positive().max(500).optional(),
+      },
+      // Plugin-Alerts src/backend/routes.ts GET /items?unread&severity&limit.
+      handler: (args, ctx) => ctx.client.get(`${ALERTS}/items`, {
+        unread: args.mode === 'active' ? 'true' : undefined,
+        severity: args.severity,
+        limit: args.limit,
+      }),
     },
     {
       // Split from `alerts` rather than folded in as a mode: a tool that
@@ -110,17 +124,20 @@ export function observabilityTools() {
       // making the record lie about what happened.
       name: 'alert_action',
       title: 'Dismiss or restore an alert',
-      description: 'Dismiss an alert, or undismiss one that was dismissed earlier. Mutating.',
+      description:
+        'Dismiss an alert (mark it read), or undismiss one (mark it unread again). Mutating.',
       mutating: true,
       hostArg: null,
       inputSchema: {
         action: z.enum(['dismiss', 'undismiss']),
-        alertId: z.string().describe('Alert id from the alerts tool'),
+        alertId: z.coerce.number().int().positive().describe('Alert id from the alerts tool'),
       },
       handler: async (args, ctx) => withUnconfirmedTarget(
-        await (args.action === 'dismiss'
-          ? ctx.client.post('/alerts/dismiss', { alertId: args.alertId })
-          : ctx.client.del('/alerts/dismiss', { alertId: args.alertId })),
+        // 26.x has no dismissed list: an alert is read or unread, and POST
+        // /items/read {ids, read} flips it, answering with the new unread count.
+        await ctx.client.post(`${ALERTS}/items/read`, {
+          ids: [args.alertId], read: args.action === 'dismiss',
+        }),
         `alert "${args.alertId}"`,
       ),
     },

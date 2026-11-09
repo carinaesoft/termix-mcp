@@ -8,7 +8,12 @@ import { startMockTermix } from './mock-termix.mjs';
 import { createClient } from '../src/termix/client.mjs';
 import { createHostRegistry } from '../src/termix/hosts.mjs';
 import { createSessionManager } from '../src/termix/sessions.mjs';
-import { runScript } from '../src/mcp/tools/exec.mjs';
+import { runScript, execTools } from '../src/mcp/tools/exec.mjs';
+import { fileTools } from '../src/mcp/tools/files.mjs';
+import { hostTools } from '../src/mcp/tools/hosts.mjs';
+import { dockerTools } from '../src/mcp/tools/docker.mjs';
+import { systemTools } from '../src/mcp/tools/system.mjs';
+import { observabilityTools } from '../src/mcp/tools/observability.mjs';
 import net from 'node:net';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -18,7 +23,6 @@ const silentLog = { info() {}, warn() {}, debug() {}, error() {} };
 function makeConfig(baseUrl, overrides = {}) {
   return {
     baseUrl,
-    serviceUrls: {},
     apiKey: 'test-key',
     timeoutMs: 5000,
     execTimeoutMs: 5000,
@@ -54,7 +58,7 @@ test('run_command writes, chmods 755, executes, and deletes in order, capturing 
 
     const fileCalls = mock.state.calls
       .map((c) => c.path)
-      .filter((p) => p.startsWith('/ssh/file_manager/ssh/'));
+      .filter((p) => p.startsWith('/plugin-api/file-manager/'));
     const idx = (needle) => fileCalls.findIndex((p) => p.endsWith(needle));
     assert.ok(idx('writeFile') !== -1, 'writeFile happened');
     assert.ok(idx('changePermissions') > idx('writeFile'), 'chmod after write');
@@ -116,7 +120,7 @@ test('a stale session is transparently reconnected once', async () => {
     // First writeFile 400s "not connected"; the manager reconnects and retries.
     const result = await runScript(ctx, host, 'echo ok');
     assert.equal(result.exitCode, 0);
-    const connects = mock.state.calls.filter((c) => c.path === '/ssh/file_manager/ssh/connect');
+    const connects = mock.state.calls.filter((c) => c.path === '/plugin-api/file-manager/connect');
     assert.equal(connects.length, 2, 'reconnected exactly once');
   } finally {
     await ctx.sessions.closeAll();
@@ -131,7 +135,7 @@ test('session is reused across two calls to the same host', async () => {
     const host = await ctx.hosts.resolve(1);
     await runScript(ctx, host, 'echo one');
     await runScript(ctx, host, 'echo two');
-    const connects = mock.state.calls.filter((c) => c.path === '/ssh/file_manager/ssh/connect');
+    const connects = mock.state.calls.filter((c) => c.path === '/plugin-api/file-manager/connect');
     assert.equal(connects.length, 1, 'only one connect for two commands');
   } finally {
     await ctx.sessions.closeAll();
@@ -496,6 +500,132 @@ test('a busy session survives the idle sweep, and its clock restarts when the wo
     assert.equal(sessions.stats().file, 0, 'an actually-idle session still goes');
   } finally {
     await sessions.closeAll();
+    await mock.close();
+  }
+});
+
+// --- Termix 26.11 plugin routes, through the real tool handlers -------------
+
+const tool = (list, name) => list.find((t) => t.name === name).handler;
+
+test('26.x: read_file and list_files go through /plugin-api/file-manager', async () => {
+  const mock = await startMockTermix();
+  const ctx = ctxFor(mock);
+  try {
+    ctx.host = await ctx.hosts.resolve(1);
+    // Seed a file the way write_file would.
+    await ctx.sessions.withFileSession(ctx.host, (s) => ctx.client.post(
+      '/plugin-api/file-manager/writeFile', { sessionId: s.sessionId, path: '/etc/motd', content: 'hi\n' },
+    ));
+    const read = await tool(fileTools(), 'read_file')({ path: '/etc/motd' }, ctx);
+    assert.equal(read.content, 'hi\n');
+    assert.equal(read.encoding, 'utf8');
+    const listing = await tool(fileTools(), 'list_files')({ path: '/etc' }, ctx);
+    assert.deepEqual(listing.files.map((f) => f.name), ['motd']);
+    assert.ok(mock.state.calls.every((c) => !c.path.startsWith('/ssh/')), 'no 2.x path was called');
+  } finally {
+    await ctx.sessions.closeAll();
+    await mock.close();
+  }
+});
+
+test('26.x: a 2.x path gets the web page, and the client names it as no endpoint', async () => {
+  const mock = await startMockTermix();
+  const ctx = ctxFor(mock);
+  try {
+    await assert.rejects(
+      () => ctx.client.post('/ssh/file_manager/ssh/executeFile', {}),
+      (error) => error.code === 'NOT_AN_API_ENDPOINT',
+    );
+  } finally {
+    await mock.close();
+  }
+});
+
+test('26.x: host_status reads the host-status plugin map, host_metrics tolerates no sample', async () => {
+  const mock = await startMockTermix();
+  const ctx = ctxFor(mock);
+  try {
+    ctx.host = await ctx.hosts.resolve(1);
+    const one = await tool(hostTools(), 'host_status')({ host: 1 }, ctx);
+    assert.equal(one.status, 'online');
+    assert.ok(mock.state.calls.some((c) => c.path === '/plugin-api/host-status/'));
+
+    ctx.host = undefined;
+    const all = await tool(hostTools(), 'host_status')({}, { ...ctx, host: undefined });
+    assert.equal(all.statuses['1'].name, 'web', 'entries are annotated with the host name');
+    assert.equal(all.uptime.formatted, '0d 0h 0m', 'uptime comes from /dashboard/uptime');
+
+    ctx.host = await ctx.hosts.resolve(1);
+    const metrics = await tool(hostTools(), 'host_metrics')({ history: false }, ctx);
+    assert.match(metrics.note, /no metrics sample yet/);
+  } finally {
+    await mock.close();
+  }
+});
+
+test('26.x: docker opens its session under /plugin-api/docker and refuses available:false', async () => {
+  const ok = await startMockTermix();
+  const ctx = ctxFor(ok);
+  try {
+    ctx.host = await ctx.hosts.resolve(1);
+    const { containers } = await tool(dockerTools(), 'docker_containers')({ all: true }, ctx);
+    assert.equal(containers[0].name, 'web');
+  } finally {
+    await ctx.sessions.closeAll();
+    await ok.close();
+  }
+
+  const missing = await startMockTermix({ dockerAvailable: false });
+  const ctx2 = ctxFor(missing);
+  try {
+    ctx2.host = await ctx2.hosts.resolve(1);
+    await assert.rejects(
+      () => tool(dockerTools(), 'docker_containers')({ all: true }, ctx2),
+      /Docker is not available on web: Docker is not installed/,
+    );
+    assert.equal(ctx2.sessions.stats().docker, 0, 'the useless session was torn down');
+  } finally {
+    await ctx2.sessions.closeAll();
+    await missing.close();
+  }
+});
+
+test('26.x: list_services says which plugin is missing instead of a bare 404', async () => {
+  const mock = await startMockTermix();
+  const ctx = ctxFor(mock);
+  try {
+    ctx.host = await ctx.hosts.resolve(1);
+    await assert.rejects(
+      () => tool(systemTools(), 'list_services')({}, ctx),
+      /"service-manager" plugin is not installed/,
+    );
+    await assert.rejects(
+      () => tool(systemTools(), 'list_processes')({}, ctx),
+      /"process-manager" plugin is not installed/,
+    );
+  } finally {
+    await mock.close();
+  }
+});
+
+test('26.x: alerts read the inbox and alert_action marks read; run_snippet returns output', async () => {
+  const mock = await startMockTermix();
+  const ctx = ctxFor(mock);
+  try {
+    const inbox = await tool(observabilityTools(), 'alerts')({ mode: 'active' }, ctx);
+    assert.equal(inbox.unread, 1);
+    const call = mock.state.calls.find((c) => c.path === '/plugin-api/alerts/items');
+    assert.ok(call, 'alerts listed from /plugin-api/alerts/items');
+
+    await tool(observabilityTools(), 'alert_action')({ action: 'dismiss', alertId: 7 }, ctx);
+    const read = mock.state.calls.find((c) => c.path === '/plugin-api/alerts/items/read');
+    assert.deepEqual(read.body, { ids: [7], read: true });
+
+    ctx.host = await ctx.hosts.resolve(1);
+    const ran = await tool(execTools(), 'run_snippet')({ snippetId: 3 }, ctx);
+    assert.match(ran.output, /up 1 day/);
+  } finally {
     await mock.close();
   }
 });

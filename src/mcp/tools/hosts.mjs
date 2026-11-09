@@ -1,6 +1,7 @@
 import { z } from 'zod';
 
 import { hostArg } from './host-arg.mjs';
+import { HOST_STATUS, METRICS } from '../../termix/routes.mjs';
 
 // Host inventory and status. list_hosts intentionally includes blocklisted
 // hosts, tagged, so the model knows they exist and are off-limits rather than
@@ -55,11 +56,17 @@ export function hostTools() {
       hostArgOptional: true,
       inputSchema: { host: hostArg.optional() },
       handler: async (args, ctx) => {
-        if (ctx.host) return ctx.client.get(`/status/${ctx.host.id}`);
+        // host-status plugin: GET / -> { [hostId]: entry }, narrowed by
+        // ?hostIds=1,2 (Plugin-Host-Status src/backend/routes.ts). Uptime moved
+        // under core /dashboard.
+        if (ctx.host) {
+          const one = await ctx.client.get(`${HOST_STATUS}/`, { hostIds: String(ctx.host.id) });
+          return one?.[ctx.host.id] ?? one?.[String(ctx.host.id)] ?? { status: 'unknown' };
+        }
 
         const [statuses, uptime, known] = await Promise.all([
-          ctx.client.get('/status'),
-          ctx.client.get('/uptime').catch(() => null),
+          ctx.client.get(`${HOST_STATUS}/`),
+          ctx.client.get('/dashboard/uptime').catch(() => null),
           ctx.hosts.list().catch(() => []),
         ]);
 
@@ -104,19 +111,24 @@ export function hostTools() {
       title: 'Host metrics',
       description:
         'Get current CPU, memory, disk, and network metrics for a host, and optionally the historical series '
-        + 'over a time range (1h, 24h, 7d).',
+        + 'over a time range (1h, 6h, 24h, 7d, 30d).',
       mutating: false,
       hostArg: 'host',
       inputSchema: {
         host: hostArg,
         history: z.boolean().default(false).describe('Include the historical series'),
-        range: z.enum(['1h', '24h', '7d']).default('24h').describe('History range when history is true'),
+        range: z.enum(['1h', '6h', '24h', '7d', '30d']).default('24h').describe('History range when history is true'),
       },
       handler: async (args, ctx) => {
-        const current = await ctx.client.get(`/metrics/${ctx.host.id}`);
+        // host-metrics plugin. null before its poller has a first sample;
+        // starting collection is a POST (metrics/start), so it is not done here.
+        const sample = await ctx.client.get(`${METRICS}/metrics/${ctx.host.id}`);
+        const current = sample ?? {
+          note: 'no metrics sample yet: Termix collects metrics only while the host is being polled',
+        };
         if (!args.history) return current;
         const history = await ctx.client
-          .get(`/metrics/history/${ctx.host.id}`, { range: args.range })
+          .get(`${METRICS}/metrics/history/${ctx.host.id}`, { range: args.range })
           .catch((e) => ({ error: e.message }));
         return { current, history };
       },

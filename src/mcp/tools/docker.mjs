@@ -2,6 +2,7 @@ import { z } from 'zod';
 
 import { hostArgWith } from './host-arg.mjs';
 import { redactContainerDetails } from '../../util/redact.mjs';
+import { DOCKER } from '../../termix/routes.mjs';
 
 const hostArg = hostArgWith('Docker must be enabled for this host.');
 
@@ -17,7 +18,7 @@ export function dockerTools() {
       hostArg: 'host',
       inputSchema: { host: hostArg, all: z.boolean().default(true) },
       handler: (args, ctx) => ctx.sessions.withDockerSession(ctx.host, async (s) => {
-        const containers = await ctx.client.get(`/docker/containers/${s.sessionId}`, { all: args.all });
+        const containers = await ctx.client.get(`${DOCKER}/containers/${s.sessionId}`, { all: args.all });
         return { containers };
       }),
     },
@@ -38,7 +39,7 @@ export function dockerTools() {
         tail: z.number().int().positive().max(2000).default(200).describe('Log lines when mode is logs'),
       },
       handler: (args, ctx) => ctx.sessions.withDockerSession(ctx.host, async (s) => {
-        const base = `/docker/containers/${s.sessionId}/${encodeURIComponent(args.containerId)}`;
+        const base = `${DOCKER}/containers/${s.sessionId}/${encodeURIComponent(args.containerId)}`;
         if (args.mode === 'logs') return ctx.client.get(`${base}/logs`, { tail: args.tail, timestamps: true });
         if (args.mode === 'stats') return ctx.client.get(`${base}/stats`);
         // Inspect is the one mode that returns the container's environment.
@@ -59,7 +60,7 @@ export function dockerTools() {
         force: z.boolean().default(false).describe('Force removal when action is remove'),
       },
       handler: (args, ctx) => ctx.sessions.withDockerSession(ctx.host, (s) => {
-        const base = `/docker/containers/${s.sessionId}/${encodeURIComponent(args.containerId)}`;
+        const base = `${DOCKER}/containers/${s.sessionId}/${encodeURIComponent(args.containerId)}`;
         if (args.action === 'remove') {
           return ctx.client.request('DELETE', `${base}/remove`, { query: { force: args.force } });
         }

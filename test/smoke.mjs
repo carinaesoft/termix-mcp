@@ -157,7 +157,7 @@ test('client normalizes a JSON error envelope into a TermixError', async () => {
   });
   try {
     const client = createClient(
-      { baseUrl: 'http://x', serviceUrls: {}, apiKey: 'k', timeoutMs: 1000, retry: 0 }, silentLog,
+      { baseUrl: 'http://x', apiKey: 'k', timeoutMs: 1000, retry: 0 }, silentLog,
     );
     await assert.rejects(() => client.get('/anything'), (e) => e instanceof TermixError
       && e.status === 400 && e.message === 'File is not executable');
@@ -176,7 +176,7 @@ test('client retries a GET on 503 then succeeds', async () => {
   };
   try {
     const client = createClient(
-      { baseUrl: 'http://x', serviceUrls: {}, apiKey: 'k', timeoutMs: 1000, retry: 2 }, silentLog,
+      { baseUrl: 'http://x', apiKey: 'k', timeoutMs: 1000, retry: 2 }, silentLog,
     );
     const res = await client.get('/thing');
     assert.deepEqual(res, { ok: true });
@@ -186,12 +186,12 @@ test('client retries a GET on 503 then succeeds', async () => {
   }
 });
 
-test('client routes file-manager paths to the FILES override when set', () => {
+test('client sends core and plugin paths to the one Termix origin', () => {
   const client = createClient(
-    { baseUrl: 'http://base', serviceUrls: { files: 'http://files' }, apiKey: 'k', timeoutMs: 1, retry: 0 },
+    { baseUrl: 'http://base', apiKey: 'k', timeoutMs: 1, retry: 0 },
     silentLog,
   );
-  assert.equal(client.urlFor('/ssh/file_manager/ssh/readFile'), 'http://files/ssh/file_manager/ssh/readFile');
+  assert.equal(client.urlFor('/plugin-api/file-manager/readFile'), 'http://base/plugin-api/file-manager/readFile');
   assert.equal(client.urlFor('/host/db/host'), 'http://base/host/db/host');
 });
 
@@ -405,31 +405,38 @@ test('call_api policy forbids credential, api-key, export and session-opening pa
     '/host/db/hosts/export',
     '/credentials',
     '/credentials/3',
-    '/vault/profiles',
+    '/plugin-api/vault/profiles',
+    '/plugin-api/secret-sources/x',
+    '/plugin-api/credential-tools/copy',
     '/users/api-keys',
     '/users/me/token',
     '/host/quick-connect',
     '/host/enroll',
-    '/ssh/file_manager/ssh/connect',
-    '/docker/ssh/connect',
-    '/ssh/file_manager/sudo-password',
-    '/guacamole/token',
+    '/plugin-api/file-manager/connect',
+    '/plugin-api/file-manager/connect-totp',
+    '/plugin-api/docker/ssh/connect',
+    '/plugin-api/file-manager/sudo-password',
+    '/plugin-api/remote-desktop/token',
+    '/plugin-api/session-sharing/links',
     '/rbac/host/4/share',
-    // Termix 2.7.0 remote-execution surfaces.
-    '/automations',
-    '/automations/7/run',
-    '/automations/webhook/abc123',
-    '/fleet/2/execute',
-    '/fleet/2/transfer/push',
-    '/ai/chat/stream',
-    '/ai/proposals/9/apply',
-    '/ai/providers',
+    // Remote-execution surfaces that store their target server-side.
+    '/plugin-api/automations',
+    '/plugin-api/automations/7/run',
+    '/plugin-api/automations/webhook/abc123',
+    '/plugin-api/fleets/2/execute',
+    '/plugin-api/fleets/2/transfer/push',
+    '/plugin-api/ai/chat/stream',
+    '/plugin-api/ai/proposals/9/apply',
+    '/plugin-api/ai/providers',
+    '/operations/docker.restart-container/run',
+    '/plugin-api/operations-center/rollouts',
+    '/plugin-api/operations-center/mcp',
   ];
   for (const path of mustRefuse) {
     assert.ok(checkForbidden(path), `${path} must be refused by call_api`);
   }
   // Ordinary endpoints stay reachable, or the escape hatch is useless.
-  for (const path of ['/users/me', '/snippets', '/audit-logs', '/uptime', '/ssh/file_manager/ssh/readFile']) {
+  for (const path of ['/users/me', '/plugin-api/snippets', '/audit-logs', '/dashboard/uptime', '/plugin-api/file-manager/readFile']) {
     assert.equal(checkForbidden(path), null, `${path} should remain callable`);
   }
 });
@@ -447,23 +454,25 @@ test('call_api denylist survives case, slash and percent-encoding tricks', () =>
     '/users/../host/db/host/1/password',
     '/Users/API-Keys',
     '/Host/Quick-Connect',
-    '/SSH/file_manager/ssh/connect',
+    '/Plugin-API/File-Manager/Connect',
+    '/plugin-api//docker/ssh/connect',
+    '/plugin-api/%64ocker/ssh/connect',
   ];
   for (const path of evasions) {
     assert.ok(checkForbidden(path), `${path} must still be refused`);
   }
 });
 
-test('2.7.0 remote-execution surfaces are refused, and the /ai rule does not over-match', () => {
+test('remote-execution surfaces are refused, and the ai rule does not over-match', () => {
   // Each of these stores its target server-side and runs later, so the request
   // carries no host id: extractHostIds finds nothing and the blocklist never
   // gets a chance to apply. They have to be refused by path or not at all.
-  for (const path of ['/automations', '/AUTOMATIONS/1/RUN', '/fleet/1/execute', '/ai', '/ai/']) {
+  for (const path of ['/plugin-api/automations', '/PLUGIN-API/AUTOMATIONS/1/RUN', '/plugin-api/fleets/1/execute', '/plugin-api/ai', '/plugin-api/ai/', '/operations']) {
     assert.ok(checkForbidden(path), `${path} must be refused by call_api`);
   }
   // The prefix rules are anchored with (\/|$), so a longer name that merely
   // starts with the same letters stays reachable.
-  for (const path of ['/airflow/status', '/fleets-report', '/automation-templates']) {
+  for (const path of ['/plugin-api/airflow/status', '/plugin-api/fleets-report', '/plugin-api/automation-templates', '/operations-log']) {
     assert.equal(checkForbidden(path), null, `${path} is a different route and must stay callable`);
   }
 });
@@ -510,8 +519,8 @@ test('the credential denylist matches a sensitive segment under any prefix', () 
   assert.ok(checkForbidden('/api/v2/vault/x'), 'nested vault refused');
   assert.ok(checkForbidden('/%63redentials'), 'percent-encoded refused');
   // Ordinary routes are unaffected.
-  assert.equal(checkForbidden('/status/12'), null);
-  assert.equal(checkForbidden('/ssh/file_manager/ssh/readFile'), null);
+  assert.equal(checkForbidden('/plugin-api/host-status'), null);
+  assert.equal(checkForbidden('/plugin-api/file-manager/readFile'), null);
 });
 
 test('a host id anywhere in the path is checked, not only on known routes', () => {
@@ -521,7 +530,7 @@ test('a host id anywhere in the path is checked, not only on known routes', () =
   assert.deepEqual(extractHostIds('/probe/route/117', null, null), ['117']);
   assert.deepEqual(extractHostIds('/ssh/db/host/117', null, null), ['117']);
   // Known shapes still work, and a path with no numeric segment finds nothing.
-  assert.deepEqual(extractHostIds('/status/12', null, null), ['12']);
+  assert.deepEqual(extractHostIds('/plugin-api/host-metrics/metrics/12', null, null), ['12']);
   assert.deepEqual(extractHostIds('/users/me', null, null), []);
 });
 
@@ -534,19 +543,21 @@ test('host ids are found whatever the field is spelled', () => {
 
 test('call_api policy finds host ids in paths, bodies and queries', () => {
   assert.deepEqual(extractHostIds('/host/db/host/7', null, null), ['7']);
-  assert.deepEqual(extractHostIds('/metrics/history/12', null, null), ['12']);
-  assert.deepEqual(extractHostIds('/host-metrics/managers/services/9', null, null), ['9']);
-  assert.deepEqual(extractHostIds('/ssh/tunnel/connect', null, { sourceHostId: 3 }), ['3']);
+  assert.deepEqual(extractHostIds('/plugin-api/host-metrics/metrics/history/12', null, null), ['12']);
+  assert.deepEqual(extractHostIds('/plugin-api/service-manager/9/units', null, null), ['9']);
+  assert.deepEqual(extractHostIds('/plugin-api/tunnels/connect', null, { sourceHostId: 3 }), ['3']);
+  assert.deepEqual(extractHostIds('/plugin-api/host-status', { hostIds: '5, 6' }, null), ['5', '6']);
   assert.deepEqual(extractHostIds('/whatever', { hostId: 4 }, null), ['4']);
   assert.deepEqual(extractHostIds('/host/bulk-update', null, { hostIds: [1, 2] }), ['1', '2']);
-  assert.deepEqual(extractHostIds('/uptime', null, null), []);
+  assert.deepEqual(extractHostIds('/dashboard/uptime', null, null), []);
 });
 
 test('call_api policy extracts session ids only on session-scoped paths', () => {
-  assert.equal(extractSessionId('/ssh/file_manager/ssh/readFile', { sessionId: 's1' }, null), 's1');
-  assert.equal(extractSessionId('/docker/containers/s2', null, null), 's2');
-  assert.equal(extractSessionId('/ssh/file_manager/ssh/writeFile', null, { sessionId: 's3' }), 's3');
-  assert.equal(extractSessionId('/snippets', { sessionId: 's4' }, null), null, 'not session-scoped');
+  assert.equal(extractSessionId('/plugin-api/file-manager/readFile', { sessionId: 's1' }, null), 's1');
+  assert.equal(extractSessionId('/plugin-api/docker/containers/S2/abc/logs', null, null), 'S2', 'case kept');
+  assert.equal(extractSessionId('/plugin-api/docker/stacks/s5', null, null), 's5');
+  assert.equal(extractSessionId('/plugin-api/file-manager/writeFile', null, { sessionId: 's3' }), 's3');
+  assert.equal(extractSessionId('/plugin-api/snippets', { sessionId: 's4' }, null), null, 'not session-scoped');
 });
 
 // --- output capping -------------------------------------------------------
@@ -1093,8 +1104,8 @@ test('session_logs cannot walk out of its endpoint with a crafted id', async () 
     // Resolve it the way fetch will, which is where the bug actually bit.
     const resolved = new URL(`http://x${asked_path}`);
     assert.ok(
-      resolved.pathname.startsWith('/session_logs/'),
-      `${asked_path} resolved to ${resolved.pathname}, outside /session_logs/`,
+      resolved.pathname.startsWith('/plugin-api/session-recording/'),
+      `${asked_path} resolved to ${resolved.pathname}, outside the recordings route`,
     );
     assert.equal(resolved.search, '', `${asked_path} opened a query string`);
   }
@@ -1102,12 +1113,12 @@ test('session_logs cannot walk out of its endpoint with a crafted id', async () 
 
 test('the client refuses any path that does not resolve to itself', async () => {
   const client = createClient(
-    { baseUrl: 'http://127.0.0.1:1', serviceUrls: {}, apiKey: 'k', timeoutMs: 50, retry: 0 },
+    { baseUrl: 'http://127.0.0.1:1', apiKey: 'k', timeoutMs: 50, retry: 0 },
     silentLog,
   );
   // Refused before any socket is opened, so an unreachable base URL is fine.
   await assert.rejects(
-    () => client.get('/session_logs/../users/api-keys'),
+    () => client.get('/plugin-api/session-recording/../../users/api-keys'),
     (error) => error.code === 'PATH_NOT_CANONICAL',
     'a traversing path reached the network',
   );

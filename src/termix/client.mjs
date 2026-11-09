@@ -1,20 +1,8 @@
-// Thin HTTP client for the Termix backend. One origin by default; optional
-// per-service overrides for deployments that do not unify the seven backend
-// services behind nginx. Every request carries the bearer key, normalizes
-// errors, and never lets the token escape into a thrown message.
-
-// Path-prefix -> service key. Longest-prefix wins, so /ssh/file_manager routes
-// to FILES before the bare /ssh could match anything.
-const SERVICE_ROUTES = [
-  ['/ssh/file_manager', 'files'],
-  ['/ssh/tunnel', 'tunnels'],
-  ['/docker', 'docker'],
-  ['/host-metrics', 'stats'],
-  ['/metrics', 'stats'],
-  ['/status', 'stats'],
-  ['/uptime', 'stats'],
-  ['/serial', 'serial'],
-];
+// Thin HTTP client for the Termix backend. Termix 26.x serves everything from
+// one backend behind nginx -- core routes at the root, every plugin under
+// /plugin-api/<plugin id>/ -- so there is a single origin. Every request carries
+// the bearer key, normalizes errors, and never lets the token escape into a
+// thrown message.
 
 export class TermixError extends Error {
   constructor({ status, code, message, method, path, body }) {
@@ -26,13 +14,6 @@ export class TermixError extends Error {
     this.path = path;
     this.body = body ?? null;
   }
-}
-
-function serviceFor(path) {
-  for (const [prefix, service] of SERVICE_ROUTES) {
-    if (path === prefix || path.startsWith(`${prefix}/`)) return service;
-  }
-  return 'main';
 }
 
 // Pull the most useful human string out of Termix's error envelope. The backend
@@ -47,11 +28,10 @@ function describeError(status, body) {
 }
 
 export function createClient(config, logger) {
-  const { baseUrl, serviceUrls, apiKey, timeoutMs, retry } = config;
+  const { baseUrl, apiKey, timeoutMs, retry } = config;
 
   function urlFor(path) {
-    const origin = serviceUrls[serviceFor(path)] ?? baseUrl;
-    return `${origin}${path}`;
+    return `${baseUrl}${path}`;
   }
 
   // Defence in depth for the whole tool surface. urlFor CONCATENATES, so any
@@ -200,6 +180,5 @@ export function createClient(config, logger) {
     // routing, and error normalization as every typed method.
     request: (method, path, opts) => request(method, path, opts),
     urlFor,
-    serviceFor,
   };
 }
